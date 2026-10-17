@@ -201,6 +201,36 @@ struct EurocSensorYaml {
     t_bs: Option<TbsBlock>,
 }
 
+/// Largest timestamp gap at which a left and right image count as one stereo
+/// pair. EuRoC's cameras are hardware-triggered, so true pairs differ by well
+/// under a microsecond while neighbouring frames are 50 ms apart.
+const STEREO_SYNC_TOLERANCE_SEC: f64 = 1e-3;
+
+/// Pairs each left sample with the right sample closest in time, if that one
+/// lies within `tolerance_sec`. Both inputs must be ordered by timestamp.
+fn match_by_timestamp(
+    left: &[DatasetSample],
+    right: &[DatasetSample],
+    tolerance_sec: f64,
+) -> Vec<Option<usize>> {
+    let mut right_idx = 0;
+    left.iter()
+        .map(|sample| {
+            let t = sample.timestamp_sec;
+            while right_idx + 1 < right.len()
+                && (right[right_idx + 1].timestamp_sec - t).abs()
+                    <= (right[right_idx].timestamp_sec - t).abs()
+            {
+                right_idx += 1;
+            }
+            right
+                .get(right_idx)
+                .filter(|r| (r.timestamp_sec - t).abs() <= tolerance_sec)
+                .map(|_| right_idx)
+        })
+        .collect()
+}
+
 /// Reader for the EuRoC MAV dataset (ASL format).
 ///
 /// Expects `<root>/mav0/cam0/data.csv` with nanosecond timestamps and
@@ -216,6 +246,10 @@ pub struct EurocDataset {
     pub left_calibration: EurocCameraCalibration,
     /// Ordered right-camera (`cam1`) samples; empty if the dataset is monocular.
     pub right_samples: Vec<DatasetSample>,
+    /// For each left sample, the index of the right sample captured with it.
+    /// `cam0` and `cam1` do not always record the same frames (MH_04, V2_03),
+    /// so pairs are matched by timestamp rather than by position.
+    right_for_left: Vec<Option<usize>>,
     /// Right-camera (`cam1`) calibration; `None` if the dataset is monocular.
     pub right_calibration: Option<EurocCameraCalibration>,
     /// Ground-truth poses (empty if GT file not present).
@@ -246,12 +280,15 @@ impl EurocDataset {
 
         let ground_truth = Self::load_ground_truth(&root);
         let imu_samples = Self::load_imu_samples(&root)?;
+        let right_for_left =
+            match_by_timestamp(&left_samples, &right_samples, STEREO_SYNC_TOLERANCE_SEC);
 
         Ok(Self {
             root,
             left_samples,
             left_calibration,
             right_samples,
+            right_for_left,
             right_calibration,
             ground_truth,
             imu_samples,
@@ -365,9 +402,16 @@ impl EurocDataset {
         &self.left_samples
     }
 
-    /// Whether the dataset has a usable right camera (calibration + samples).
+    /// The right sample synchronised with left sample `left_idx`, if any.
+    pub fn right_sample_for(&self, left_idx: usize) -> Option<&DatasetSample> {
+        let right_idx = (*self.right_for_left.get(left_idx)?)?;
+        self.right_samples.get(right_idx)
+    }
+
+    /// Whether the dataset has a usable right camera: its calibration and at
+    /// least one image synchronised with a left one.
     pub fn is_stereo(&self) -> bool {
-        self.right_calibration.is_some() && !self.right_samples.is_empty()
+        self.right_calibration.is_some() && self.right_for_left.iter().any(Option::is_some)
     }
 
     /// Whether the dataset has IMU samples
@@ -707,5 +751,70 @@ mod tests {
             rect.baseline()
         );
         assert!(rect.bf() > 0.0);
+    }
+
+    fn samples_at(timestamps_ms: &[f64]) -> Vec<DatasetSample> {
+        timestamps_ms
+            .iter()
+            .map(|&ms| DatasetSample {
+                timestamp_sec: 1_403_638_127.0 + ms * 1e-3,
+                image_path: PathBuf::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stereo_pairs_survive_a_missing_first_right_frame() {
+        // MH_04: cam1 lacks cam0's first frame, so positional pairing is off by one.
+        let left = samples_at(&[0.0, 50.0, 100.0, 150.0]);
+        let right = samples_at(&[50.0, 100.0, 150.0]);
+        let pairs = match_by_timestamp(&left, &right, STEREO_SYNC_TOLERANCE_SEC);
+        assert_eq!(pairs, vec![None, Some(0), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn stereo_pairs_skip_frames_dropped_by_the_left_camera() {
+        // V2_03: cam0 drops frames that cam1 keeps.
+        let left = samples_at(&[0.0, 50.0, 200.0, 250.0]);
+        let right = samples_at(&[0.0, 50.0, 100.0, 150.0, 200.0, 250.0]);
+        let pairs = match_by_timestamp(&left, &right, STEREO_SYNC_TOLERANCE_SEC);
+        assert_eq!(pairs, vec![Some(0), Some(1), Some(4), Some(5)]);
+    }
+
+    #[test]
+    fn stereo_pairs_tolerate_sub_millisecond_trigger_jitter() {
+        let left = samples_at(&[0.0, 50.0]);
+        let right = samples_at(&[0.000_128, 49.999_9]);
+        let pairs = match_by_timestamp(&left, &right, STEREO_SYNC_TOLERANCE_SEC);
+        assert_eq!(pairs, vec![Some(0), Some(1)]);
+    }
+
+    fn dataset_with_right(right_ms: &[f64]) -> EurocDataset {
+        const IDENTITY: [f64; 16] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let left_samples = samples_at(&[0.0, 50.0, 100.0]);
+        let right_samples = samples_at(right_ms);
+        EurocDataset {
+            root: PathBuf::new(),
+            right_for_left: match_by_timestamp(
+                &left_samples,
+                &right_samples,
+                STEREO_SYNC_TOLERANCE_SEC,
+            ),
+            left_samples,
+            left_calibration: stereo_cam(IDENTITY, 367.0, 248.0),
+            right_samples,
+            right_calibration: Some(stereo_cam(IDENTITY, 367.0, 248.0)),
+            ground_truth: Vec::new(),
+            imu_samples: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_right_camera_with_no_synchronised_image_is_not_stereo() {
+        assert!(dataset_with_right(&[50.0]).is_stereo());
+        assert!(!dataset_with_right(&[25.0, 75.0]).is_stereo());
+        assert!(!dataset_with_right(&[]).is_stereo());
     }
 }

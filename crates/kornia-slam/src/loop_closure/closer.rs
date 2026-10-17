@@ -94,6 +94,25 @@ impl LoopCloser {
         }
     }
 
+    /// Keyframes of `map` that look like the given descriptors, best first,
+    /// for relocalization. The database outlives map resets, so entries of
+    /// keyframes no longer in the map are skipped.
+    pub(crate) fn relocalization_candidates(
+        &self,
+        descriptors: &[[u8; 32]],
+        map: &Map,
+        max_candidates: usize,
+    ) -> Vec<usize> {
+        let query = compute_bow(&self.vocabulary, descriptors);
+        self.kf_database
+            .detect_candidates(&query, &HashSet::new(), 0.0)
+            .into_iter()
+            .map(|candidate| candidate.kf_idx)
+            .filter(|&kf_idx| map.get_keyframe(kf_idx).is_some())
+            .take(max_candidates)
+            .collect()
+    }
+
     /// Indexes a freshly inserted keyframe for place recognition, queries the
     /// database for appearance-based loop candidates, and closes a verified
     /// loop when correction is allowed.

@@ -55,8 +55,9 @@ impl EurocConfig {
 pub struct EurocSource {
     dataset: EurocDataset,
     cursor: usize,
-    start: usize,
     end: usize,
+    /// Frames the window yields.
+    n_frames: usize,
     /// When `Some`, the source rectifies the left+right pair and yields stereo.
     rectifier: Option<StereoRectifier>,
     with_imu: bool,
@@ -80,11 +81,9 @@ impl EurocSource {
         let dataset = EurocDataset::open(root).map_err(SourceError::other)?;
         let n = dataset.samples().len();
         let start = start_frame.min(n);
-        let end = if max_frames > 0 {
-            (start + max_frames).min(n)
-        } else {
-            n
-        };
+        let yields = |idx: usize| yields_frame(&dataset, stereo, idx);
+        let end = window_end(start, n, max_frames, yields);
+        let n_frames = (start..end).filter(|&idx| yields(idx)).count();
 
         let rectifier = if stereo {
             if !dataset.is_stereo() {
@@ -122,8 +121,8 @@ impl EurocSource {
         Ok(Self {
             dataset,
             cursor: start,
-            start,
             end,
+            n_frames,
             rectifier,
             with_imu,
             imu_cursor,
@@ -153,14 +152,13 @@ impl FrameSource for EurocSource {
     }
 
     fn n_frames_hint(&self) -> Option<usize> {
-        Some(self.end - self.start)
+        Some(self.n_frames)
     }
 
     fn next_frame(&mut self) -> Result<Option<FrameItem>, SourceError> {
-        if self.cursor >= self.end {
+        let Some(idx) = self.advance() else {
             return Ok(None);
-        }
-        let idx = self.cursor;
+        };
         let sample = &self.dataset.left_samples[idx];
         let timestamp_sec = sample.timestamp_sec;
         let left_raw = read_image_png_mono8(&sample.image_path)
@@ -169,7 +167,11 @@ impl FrameSource for EurocSource {
 
         let (image, right_image) = match &self.rectifier {
             Some(rect) => {
-                let right_path = &self.dataset.right_samples[idx].image_path;
+                let right_path = &self
+                    .dataset
+                    .right_sample_for(idx)
+                    .ok_or_else(|| SourceError::other("left frame has no right partner"))?
+                    .image_path;
                 let right_raw = read_image_png_mono8(right_path)
                     .map_err(SourceError::other)?
                     .into_inner();
@@ -180,7 +182,6 @@ impl FrameSource for EurocSource {
         };
         let imu_samples = self.imu_samples_until(timestamp_sec);
 
-        self.cursor += 1;
         Ok(Some(FrameItem {
             idx,
             timestamp_sec,
@@ -217,6 +218,19 @@ impl EurocSource {
         }
     }
 
+    /// Next left frame to yield. IMU samples of a skipped frame are delivered
+    /// with the next yielded one.
+    fn advance(&mut self) -> Option<usize> {
+        while self.cursor < self.end {
+            let idx = self.cursor;
+            self.cursor += 1;
+            if yields_frame(&self.dataset, self.rectifier.is_some(), idx) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
     fn imu_samples_until(&mut self, timestamp_sec: f64) -> Vec<ImuMeasurement> {
         if !self.with_imu {
             return Vec::new();
@@ -234,10 +248,43 @@ impl EurocSource {
     }
 }
 
+/// Whether the left sample `idx` is yielded: any sample in mono mode, and in
+/// stereo mode only one with a synchronised right image.
+fn yields_frame(dataset: &EurocDataset, stereo: bool, idx: usize) -> bool {
+    !stereo || dataset.right_sample_for(idx).is_some()
+}
+
+/// End of the window from `start` that holds `max_frames` yielded samples
+/// (0 = all of them), out of `n`.
+fn window_end(start: usize, n: usize, max_frames: usize, yields: impl Fn(usize) -> bool) -> usize {
+    match max_frames.checked_sub(1) {
+        Some(last) => (start..n)
+            .filter(|&idx| yields(idx))
+            .nth(last)
+            .map_or(n, |idx| idx + 1),
+        None => n,
+    }
+}
+
 fn imu_measurement(sample: &ImuSample) -> ImuMeasurement {
     ImuMeasurement {
         timestamp: sample.timestamp_sec,
         gyro: Vec3F64::new(sample.gyro[0], sample.gyro[1], sample.gyro[2]),
         accel: Vec3F64::new(sample.accel[0], sample.accel[1], sample.accel[2]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_end;
+
+    #[test]
+    fn a_bounded_window_counts_only_yielded_samples() {
+        let paired = |idx: usize| idx != 0 && idx != 3;
+
+        assert_eq!(window_end(0, 6, 1, paired), 2);
+        assert_eq!(window_end(0, 6, 3, paired), 5);
+        assert_eq!(window_end(0, 6, 10, paired), 6);
+        assert_eq!(window_end(2, 6, 0, paired), 6);
     }
 }
