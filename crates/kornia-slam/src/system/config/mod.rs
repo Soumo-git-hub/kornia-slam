@@ -154,7 +154,7 @@ impl StereoCloseDepth {
 }
 
 /// Local mapping (keyframe insertion, culling and local BA / VI-BA).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct MappingConfig {

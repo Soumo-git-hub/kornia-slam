@@ -315,6 +315,45 @@ mod tests {
     }
 
     #[test]
+    fn default_preserves_frame_and_ratio_boundaries() {
+        let policy = KeyframePolicy::default();
+        // The original frame-based policy admits weak tracking from the
+        // minimum gap, but otherwise waits for the maximum gap. Keep the
+        // equality and minimum-inlier boundaries explicit through the move.
+        let cases = [
+            (80, 100, 8),
+            (60, 100, 8), // Exactly at ref_ratio is not weak.
+            (59, 100, 3),
+            (15, 30, 3), // Fewest inliers eligible for the weak-ratio rule.
+            (14, 30, 8),
+            (50, 0, 3),
+        ];
+        for frames in 0..12 {
+            for (inliers, n_ref, first_insert) in cases {
+                let expected = frames >= first_insert;
+                let evidence = evidence(frames, inliers, n_ref);
+                let case = format!("frames={frames} inliers={inliers} n_ref={n_ref}");
+                assert_eq!(policy.should_insert_with(&evidence), expected, "{case}");
+                assert_eq!(
+                    policy.should_insert(
+                        evidence.curr_idx,
+                        evidence.last_keyframe_idx,
+                        inliers,
+                        n_ref,
+                    ),
+                    expected,
+                    "{case}"
+                );
+                assert_eq!(
+                    policy.should_insert_with(&evidence.with_median_parallax_px(Some(1e6))),
+                    expected,
+                    "{case}: FrameBased ignores parallax"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn parallax_respects_shared_guards_and_threshold() {
         let policy = parallax_policy();
         assert!(!policy.should_insert_with(&evidence(5, 80, 100)));

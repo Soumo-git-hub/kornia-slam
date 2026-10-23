@@ -65,7 +65,7 @@ impl SystemConfig {
             two_view_init: tuning.initialization.clone(),
             map_projection: tuning.map_projection.clone(),
             keyframe_policy: orb.keyframes,
-            keyframe_culling: orb.mapping.keyframe_culling.clone(),
+            keyframe_culling: orb.mapping.keyframe_culling,
             tracking_loss_recovery: tuning.loss_recovery,
             local_mapping: orb.mapping.execution,
             stereo_close_depth_m: rig

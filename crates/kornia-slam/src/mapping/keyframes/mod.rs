@@ -14,7 +14,7 @@ pub use insertion::{KeyframeEvidence, KeyframeInsertionStrategy, KeyframePolicy}
 pub use parallax::{median_compensated_parallax_px, median_parallax_px};
 
 /// Selects redundant-keyframe culling independently from keyframe insertion.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum KeyframeCullingStrategy {
     /// Keep the historical runtime behaviour: no redundant-keyframe culling.

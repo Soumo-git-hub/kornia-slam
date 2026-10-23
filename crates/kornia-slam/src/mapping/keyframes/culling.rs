@@ -12,18 +12,17 @@ use std::collections::HashMap;
 
 // Landmark culling is implemented in `mapping::culling`.
 
-// Landmark culling tests remain below temporarily while their fixtures are
-// shared with the redundant-keyframe tests.
+// Redundant-keyframe test fixtures live beside the policy tests.
 #[cfg(test)]
 #[path = "culling_tests.rs"]
-mod keyframe_tests;
+pub(crate) mod keyframe_tests;
 
 /// Redundant-keyframe culling (ORB-SLAM's local-mapping `KeyFrameCulling`).
 ///
 /// Off unless the caller runs [`cull_redundant_keyframes`]; the defaults are
 /// ORB-SLAM3's where it has one. `#[non_exhaustive]`: start from
 /// [`Default`] and set the fields.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]

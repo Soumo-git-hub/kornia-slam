@@ -172,7 +172,7 @@ fn frontend_and_keyframe_settings_are_range_checked() {
     for px in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert_eq!(
             parallax(Some(px)).as_deref(),
-            Some("keyframes.min_parallax_px"),
+            Some("keyframes.insertion.min_parallax_px"),
             "parallax {px}"
         );
     }
@@ -494,6 +494,13 @@ mod ron_files {
 
     #[test]
     fn keyframe_insertion_accepts_legacy_or_canonical_ron_but_not_both() {
+        let legacy_none =
+            parse("(version: 1, pipeline: OrbSlam((keyframes: (min_parallax_px: None))))").unwrap();
+        assert_eq!(
+            orb(&legacy_none).keyframes.insertion,
+            KeyframeInsertionStrategy::FrameBased
+        );
+
         let canonical = parse(
             "(version: 1, pipeline: OrbSlam((keyframes: (insertion: Parallax(min_parallax_px: 12.0)))))",
         )
@@ -508,26 +515,71 @@ mod ron_files {
         assert!(serialized.contains("insertion: Parallax"));
         assert!(!serialized.contains("min_parallax_px: Some"));
 
-        assert!(parse(
-            "(version: 1, pipeline: OrbSlam((keyframes: (insertion: FrameBased, min_parallax_px: None))))",
-        )
-        .is_err());
+        assert!(matches!(
+            parse_error(
+                "(version: 1, pipeline: OrbSlam((keyframes: (insertion: FrameBased, min_parallax_px: None))))",
+            ),
+            ron::Error::Message(message)
+                if message == "keyframes.insertion and legacy keyframes.min_parallax_px are ambiguous"
+        ));
     }
 
     #[test]
     fn mapping_culling_selection_is_independent_of_insertion() {
-        let config = parse(
-            "(version: 1, pipeline: OrbSlam((keyframes: (insertion: FrameBased), mapping: (keyframe_culling: Redundancy((min_keyframes: 2))))))",
-        )
-        .unwrap();
-        assert_eq!(
-            orb(&config).keyframes.insertion,
-            KeyframeInsertionStrategy::FrameBased
-        );
-        assert!(matches!(
-            orb(&config).mapping.keyframe_culling,
-            crate::mapping::KeyframeCullingStrategy::Redundancy(_)
-        ));
+        let cases = [
+            ("FrameBased", "Disabled", false, false),
+            ("FrameBased", "Redundancy((min_keyframes: 2))", false, true),
+            ("Parallax(min_parallax_px: 12.0)", "Disabled", true, false),
+            (
+                "Parallax(min_parallax_px: 12.0)",
+                "Redundancy((min_keyframes: 2))",
+                true,
+                true,
+            ),
+        ];
+        for (insertion, culling, parallax, redundancy) in cases {
+            let config = parse(&format!(
+                "(version: 1, pipeline: OrbSlam((keyframes: (insertion: {insertion}), mapping: (keyframe_culling: {culling}))))"
+            ))
+            .unwrap();
+            assert_eq!(
+                matches!(
+                    orb(&config).keyframes.insertion,
+                    KeyframeInsertionStrategy::Parallax {
+                        min_parallax_px: 12.0
+                    }
+                ),
+                parallax,
+                "{insertion}"
+            );
+            assert_eq!(
+                matches!(
+                    orb(&config).mapping.keyframe_culling,
+                    crate::mapping::KeyframeCullingStrategy::Redundancy(_)
+                ),
+                redundancy,
+                "{culling}"
+            );
+            let reloaded = parse(&ron(&config)).unwrap();
+            assert_eq!(
+                matches!(
+                    orb(&reloaded).keyframes.insertion,
+                    KeyframeInsertionStrategy::Parallax {
+                        min_parallax_px: 12.0
+                    }
+                ),
+                parallax,
+                "round trip {insertion}"
+            );
+            assert_eq!(
+                matches!(
+                    orb(&reloaded).mapping.keyframe_culling,
+                    crate::mapping::KeyframeCullingStrategy::Redundancy(_)
+                ),
+                redundancy,
+                "round trip {culling}"
+            );
+        }
     }
 
     /// Tuning is not part of the file format, so a file cannot set it.
@@ -581,8 +633,16 @@ mod ron_files {
                 "gap",
             ),
             (
+                "(version: 1, pipeline: OrbSlam((keyframes: (insertion: Parallax(threshold: 3.0)))))",
+                "threshold",
+            ),
+            (
                 "(version: 1, pipeline: OrbSlam((mapping: (window: 3))))",
                 "window",
+            ),
+            (
+                "(version: 1, pipeline: OrbSlam((mapping: (keyframe_culling: Redundancy((ratio: 0.9))))))",
+                "ratio",
             ),
             (
                 "(version: 1, pipeline: OrbSlam((loop_closing: Enabled(vocabulary: \"v.txt\", pgo: true))))",

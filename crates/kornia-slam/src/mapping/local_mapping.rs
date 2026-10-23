@@ -378,9 +378,15 @@ mod tests {
     use std::time::Duration;
 
     use kornia_3d::camera::PinholeCamera;
+    use kornia_3d::pose::Pose3d;
     use kornia_algebra::Vec3F64;
 
-    use super::{BaUpdateError, KeyframeJob, LocalMapping, LocalMappingBackend, LocalMappingMode};
+    use super::{
+        BaUpdateError, KeyframeJob, LocalMapping, LocalMappingBackend, LocalMappingMode,
+        merge_and_cull_keyframes,
+    };
+    use crate::mapping::keyframes::KeyframeCullingStrategy;
+    use crate::mapping::keyframes::culling::keyframe_tests::{culling_fixture, enabled};
     use crate::mapping::map::{InertialAlignment, KeyframeVelocity, Map};
     use kornia_algebra::SO3F64;
     use kornia_sensors::imu::ImuBias;
@@ -463,6 +469,108 @@ mod tests {
             .results
             .recv_timeout(Duration::from_secs(2))
             .expect("local-mapping worker did not publish a result");
+    }
+
+    #[test]
+    fn redundancy_culling_is_reported_in_the_completion() {
+        let map = Arc::new(Mutex::new(culling_fixture()));
+        let mapping = LocalMapping::new_with_keyframe_culling(
+            LocalMappingMode::Synchronous,
+            Arc::clone(&map),
+            test_camera(),
+            KeyframeCullingStrategy::Redundancy(enabled()),
+        );
+
+        assert!(mapping.submit(visual_job()));
+        let completions = mapping.drain_completions();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].removed_keyframes, vec![7, 11, 19]);
+        assert!(map.lock().unwrap().get_keyframe(7).is_none());
+    }
+
+    #[test]
+    fn uninitialized_imu_suppresses_redundancy_culling() {
+        let mut map = culling_fixture();
+        let update = map.full_ba_snapshot().into_update();
+        let job = KeyframeJob {
+            imu_initialized: false,
+            imu_t_bc: Some(Pose3d::IDENTITY),
+            gravity_world: Vec3F64::ZERO,
+        };
+
+        let completion = merge_and_cull_keyframes(
+            &mut map,
+            update,
+            &job,
+            &KeyframeCullingStrategy::Redundancy(enabled()),
+        )
+        .expect("current snapshot is accepted");
+
+        assert!(completion.removed_keyframes.is_empty());
+        assert!(map.get_keyframe(7).is_some());
+    }
+
+    #[test]
+    fn rejected_ba_merge_does_not_cull_or_publish_keyframes() {
+        let mut map = culling_fixture();
+        let update = map.full_ba_snapshot().into_update();
+        map.apply_inertial_alignment(InertialAlignment {
+            scale: 2.0,
+            rotation: SO3F64::IDENTITY,
+            keyframe_velocities: map
+                .keyframes()
+                .iter()
+                .map(|kf| KeyframeVelocity {
+                    keyframe_idx: kf.frame.idx,
+                    velocity_world: Vec3F64::ZERO,
+                })
+                .collect(),
+            bias: ImuBias::default(),
+        })
+        .expect("valid alignment advances the world epoch");
+
+        assert!(matches!(
+            merge_and_cull_keyframes(
+                &mut map,
+                update,
+                &visual_job(),
+                &KeyframeCullingStrategy::Redundancy(enabled()),
+            ),
+            Err(BaUpdateError::ObsoleteWorldFrame)
+        ));
+        assert!(map.get_keyframe(7).is_some());
+    }
+
+    #[test]
+    fn asynchronous_culling_waits_for_the_publication_gate() {
+        let map = Arc::new(Mutex::new(culling_fixture()));
+        let mapping = LocalMapping::new_with_keyframe_culling(
+            LocalMappingMode::Asynchronous,
+            Arc::clone(&map),
+            test_camera(),
+            KeyframeCullingStrategy::Redundancy(enabled()),
+        );
+        let gate = mapping
+            .publication_gate()
+            .expect("asynchronous mapping has a publication gate");
+        let guard = gate.lock().unwrap();
+        assert!(mapping.submit(visual_job()));
+        let LocalMappingBackend::Asynchronous { handle, .. } = &mapping.backend else {
+            unreachable!("asynchronous mode selected the wrong backend");
+        };
+        assert!(matches!(
+            handle.results.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(map.lock().unwrap().get_keyframe(7).is_some());
+        drop(guard);
+
+        let completion = handle
+            .results
+            .recv_timeout(Duration::from_secs(2))
+            .expect("local-mapping worker did not publish a result");
+        assert_eq!(completion.removed_keyframes, vec![7, 11, 19]);
+        assert!(map.lock().unwrap().get_keyframe(7).is_none());
     }
 
     /// A map holding one landmark that fails the culling policy, with a live

@@ -294,20 +294,13 @@ impl SlamSystem {
     }
 
     fn apply_local_mapping_results(&mut self) {
-        let Some(reference_idx) = self.state.current_keyframe_idx else {
-            // Still drain results so a completed worker cannot build a result backlog.
-            for completion in self.local_mapping.drain_completions() {
-                self.forget_keyframes(&completion.removed_keyframes);
-            }
-            return;
-        };
-
         for completion in self.local_mapping.drain_completions() {
             let result = completion.result;
-            if let Some(correction) = result
-                .keyframe_corrections
-                .iter()
-                .find(|correction| correction.kf_idx == reference_idx)
+            if let Some(reference_idx) = self.state.current_keyframe_idx
+                && let Some(correction) = result
+                    .keyframe_corrections
+                    .iter()
+                    .find(|correction| correction.kf_idx == reference_idx)
             {
                 self.state.pose_world_to_cam = apply_reference_pose_correction(
                     self.state.pose_world_to_cam,
@@ -324,6 +317,39 @@ impl SlamSystem {
     /// Drops loop-closing state for keyframes removed by canonical map
     /// culling before later recognition or pose-graph work can reference them.
     fn forget_keyframes(&mut self, removed_keyframes: &[usize]) {
+        let (state_reference_missing, last_keyframe_missing, replacement) = {
+            let map = self.map.lock().unwrap();
+            let state_reference_missing = self
+                .state
+                .current_keyframe_idx
+                .is_some_and(|idx| map.get_keyframe(idx).is_none());
+            let last_keyframe_missing = self
+                .state
+                .last_keyframe_idx
+                .is_some_and(|idx| map.get_keyframe(idx).is_none());
+            let replacement = (state_reference_missing || last_keyframe_missing)
+                .then(|| map.keyframes().last())
+                .flatten()
+                .map(|kf| kf.frame.idx);
+            (state_reference_missing, last_keyframe_missing, replacement)
+        };
+        if state_reference_missing || last_keyframe_missing {
+            if let Some(idx) = replacement {
+                if state_reference_missing {
+                    self.state.current_keyframe_idx = Some(idx);
+                }
+                if last_keyframe_missing {
+                    self.state.last_keyframe_idx = Some(idx);
+                }
+            } else {
+                if state_reference_missing {
+                    self.state.current_keyframe_idx = None;
+                }
+                if last_keyframe_missing {
+                    self.state.last_keyframe_idx = None;
+                }
+            }
+        }
         if let Some(loop_closer) = self.loop_closer.as_mut() {
             loop_closer.forget_keyframes(removed_keyframes);
         }

@@ -1,13 +1,31 @@
 //! Policies that remain owned by frame tracking.
 
 /// Recently-lost grace period policy (mirrors ORB-SLAM3's RECENTLY_LOST vs
-/// LOST distinction), bridging interruptions without throwing the map away.
+/// LOST distinction), bridging interruptions (fast rotation, motion blur,
+/// dropped frames) without throwing the map away.
+///
+/// With a settled IMU, tracking coasts on the inertial prediction for up to
+/// `timeout_imu_sec` (ORB-SLAM3's `time_recently_lost`), and keyframes
+/// keep extending the map at the predicted pose every
+/// `keyframe_interval_while_lost_sec`: after a fast turn the camera faces
+/// space the map does not cover, and only new landmarks there let tracking
+/// resume. Without a settled inertial state tracking gets only the short
+/// visual grace period, and a map that's too young is reset at once.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrackingLossRecoveryPolicy {
+    /// A map with at most this many keyframes is reset as soon as tracking
+    /// fails, with no grace period.
     pub min_keyframes_for_grace: usize,
+    /// Grace period once the IMU has been initialized for at least
+    /// `min_imu_confidence_sec`.
     pub timeout_imu_sec: f64,
+    /// Grace period otherwise (no IMU, or too recently initialized).
     pub timeout_visual_sec: f64,
+    /// How long the IMU must have been initialized before `timeout_imu_sec`
+    /// applies instead of `timeout_visual_sec`.
     pub min_imu_confidence_sec: f64,
+    /// Seconds between keyframes inserted at the IMU-predicted pose
+    /// while coasting.
     pub keyframe_interval_while_lost_sec: f64,
 }
 

@@ -22,7 +22,12 @@ const MIN_FOUND_RATIO: f64 = 0.20;
 /// more, from a window that could not observe its depth) reaches it.
 const MAX_LANDMARK_DISTANCE_M: f64 = 1e4;
 
-/// Ids of landmarks that fail the culling policy.
+/// Ids of the landmarks that fail the culling policy.
+///
+/// A poor found ratio once a landmark has been seen enough times to judge,
+/// any landmark sitting behind a keyframe that observes it, and any farther
+/// than [`MAX_LANDMARK_DISTANCE_M`] from every keyframe observing it (the map
+/// holds only finite positions).
 fn select_for_culling(map: &Map) -> Vec<usize> {
     let mut selected: HashSet<usize> = HashSet::new();
 
@@ -35,6 +40,7 @@ fn select_for_culling(map: &Map) -> Vec<usize> {
         }
     }
 
+    // Map point indices are dense, so a slot per point beats a hash map on large maps.
     let mut nearest = vec![f64::INFINITY; map.map_points().len()];
     for kf in map.keyframes() {
         let centre = kf.frame.pose_world_to_cam.inverse().translation;
