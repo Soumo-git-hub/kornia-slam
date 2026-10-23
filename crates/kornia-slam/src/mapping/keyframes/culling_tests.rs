@@ -6,7 +6,7 @@ use crate::mapping::map::tests::{assert_map_consistent, test_frame_with_pose};
 use crate::mapping::map::{ImuFactor, MapInsertion};
 use crate::mapping::map::{Keyframe, LandmarkSeed, Map, ObservationKey};
 use crate::mapping::stationary::StationaryFactor;
-use crate::mapping::wheel_odom::WheelOdomMeasurement;
+use crate::mapping::wheel_odom::{WheelOdomFactor, WheelOdomMeasurement};
 use kornia_3d::camera::PinholeCamera;
 use kornia_3d::pose::Pose3d;
 use kornia_algebra::Mat3F64;

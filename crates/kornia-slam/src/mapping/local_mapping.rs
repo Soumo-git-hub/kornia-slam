@@ -6,6 +6,7 @@ use kornia_3d::camera::PinholeCamera;
 use kornia_3d::pose::Pose3d;
 use kornia_algebra::Vec3F64;
 
+use crate::mapping::keyframes::{KeyframeCullingStrategy, cull_redundant_keyframes};
 use crate::mapping::map::{BaSnapshot, BaUpdate, BaUpdateError, LocalBaMergeResult, Map};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -61,11 +62,20 @@ pub struct LocalMapping {
     backend: LocalMappingBackend,
 }
 
+/// An accepted local-mapping writeback and the keyframes retired as part of
+/// that same map transaction. Kept crate-private so public result reporting
+/// remains compatible while `SlamSystem` can retire its ID-indexed state.
+pub(crate) struct LocalMappingCompletion {
+    pub(crate) result: LocalBaMergeResult,
+    pub(crate) removed_keyframes: Vec<usize>,
+}
+
 enum LocalMappingBackend {
     Synchronous {
         map: Arc<Mutex<Map>>,
         camera: PinholeCamera,
-        results: Mutex<Vec<LocalBaMergeResult>>,
+        keyframe_culling: KeyframeCullingStrategy,
+        results: Mutex<Vec<LocalMappingCompletion>>,
     },
     Asynchronous {
         handle: LocalMappingHandle,
@@ -85,17 +95,58 @@ fn merge_and_cull(map: &mut Map, update: BaUpdate) -> Result<LocalBaMergeResult,
     Ok(merged)
 }
 
+fn merge_and_cull_keyframes(
+    map: &mut Map,
+    update: BaUpdate,
+    job: &KeyframeJob,
+    strategy: &KeyframeCullingStrategy,
+) -> Result<LocalMappingCompletion, BaUpdateError> {
+    let result = merge_and_cull(map, update)?;
+    // Before inertial initialization, keep the conservative historical
+    // behaviour: the redundancy culler must not merge long IMU intervals.
+    let removed_keyframes = match strategy {
+        KeyframeCullingStrategy::Disabled => Vec::new(),
+        KeyframeCullingStrategy::Redundancy(_)
+            if job.imu_t_bc.is_some() && !job.imu_initialized =>
+        {
+            Vec::new()
+        }
+        KeyframeCullingStrategy::Redundancy(config) => {
+            cull_redundant_keyframes(map, config, None, None).removed
+        }
+    };
+    Ok(LocalMappingCompletion {
+        result,
+        removed_keyframes,
+    })
+}
+
 impl LocalMapping {
     pub fn new(mode: LocalMappingMode, map: Arc<Mutex<Map>>, camera: PinholeCamera) -> Self {
+        Self::new_with_keyframe_culling(mode, map, camera, KeyframeCullingStrategy::Disabled)
+    }
+
+    pub(crate) fn new_with_keyframe_culling(
+        mode: LocalMappingMode,
+        map: Arc<Mutex<Map>>,
+        camera: PinholeCamera,
+        keyframe_culling: KeyframeCullingStrategy,
+    ) -> Self {
         let backend = match mode {
             LocalMappingMode::Synchronous => LocalMappingBackend::Synchronous {
                 map,
                 camera,
+                keyframe_culling,
                 results: Mutex::new(Vec::new()),
             },
             LocalMappingMode::Asynchronous => {
                 let publication_gate = Arc::new(Mutex::new(()));
-                let handle = LocalMappingHandle::spawn(map, Arc::clone(&publication_gate), camera);
+                let handle = LocalMappingHandle::spawn(
+                    map,
+                    Arc::clone(&publication_gate),
+                    camera,
+                    keyframe_culling,
+                );
                 LocalMappingBackend::Asynchronous {
                     handle,
                     publication_gate,
@@ -119,6 +170,7 @@ impl LocalMapping {
             LocalMappingBackend::Synchronous {
                 map,
                 camera,
+                keyframe_culling,
                 results,
             } => {
                 let snapshot = capture_local_window(
@@ -128,9 +180,11 @@ impl LocalMapping {
                 // Cull under the same lock as the merge, so a completed result
                 // is never observable before cleanup. A rejected snapshot culls
                 // nothing.
-                let merged = merge_and_cull(
+                let merged = merge_and_cull_keyframes(
                     &mut map.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
                     update,
+                    &job,
+                    keyframe_culling,
                 );
                 if let Ok(result) = merged {
                     results
@@ -145,13 +199,20 @@ impl LocalMapping {
     }
 
     pub fn drain_results(&self) -> Vec<LocalBaMergeResult> {
+        self.drain_completions()
+            .into_iter()
+            .map(|completion| completion.result)
+            .collect()
+    }
+
+    pub(crate) fn drain_completions(&self) -> Vec<LocalMappingCompletion> {
         match &self.backend {
             LocalMappingBackend::Synchronous { results, .. } => std::mem::take(
                 &mut *results
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()),
             ),
-            LocalMappingBackend::Asynchronous { handle, .. } => handle.drain_results(),
+            LocalMappingBackend::Asynchronous { handle, .. } => handle.drain_completions(),
         }
     }
 }
@@ -187,7 +248,7 @@ impl Drop for WorkerExit {
 
 struct LocalMappingHandle {
     pending: Arc<PendingJob>,
-    results: mpsc::Receiver<LocalBaMergeResult>,
+    results: mpsc::Receiver<LocalMappingCompletion>,
     join_handle: Option<JoinHandle<()>>,
 }
 
@@ -196,6 +257,7 @@ impl LocalMappingHandle {
         map: Arc<Mutex<Map>>,
         publication_gate: Arc<Mutex<()>>,
         camera: PinholeCamera,
+        keyframe_culling: KeyframeCullingStrategy,
     ) -> Self {
         let pending = Arc::new(PendingJob::default());
         let worker_pending = Arc::clone(&pending);
@@ -244,9 +306,11 @@ impl LocalMappingHandle {
                         let _publication = publication_gate
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        let merged = merge_and_cull(
+                        let merged = merge_and_cull_keyframes(
                             &mut map.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
                             update,
+                            &job,
+                            &keyframe_culling,
                         );
                         merged.is_ok_and(|result| result_sender.send(result).is_err())
                     };
@@ -279,7 +343,7 @@ impl LocalMappingHandle {
         true
     }
 
-    fn drain_results(&self) -> Vec<LocalBaMergeResult> {
+    fn drain_completions(&self) -> Vec<LocalMappingCompletion> {
         self.results.try_iter().collect()
     }
 }

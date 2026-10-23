@@ -294,7 +294,7 @@ fn image_history_follows_successful_frames_only() {
 
 mod keyframe_evidence {
     use super::*;
-    use crate::tracking::parallax::tests::{
+    use crate::mapping::keyframes::parallax::tests::{
         all_matches, camera, frame_seeing_points, map_with_keyframe_at,
     };
     use kornia_algebra::{Mat3F64, SO3F64};
@@ -305,7 +305,13 @@ mod keyframe_evidence {
     fn system_tracked_at(min_parallax_px: Option<f64>, tracked: Pose3d) -> SlamSystem {
         let mut config = mono();
         let PipelineDefinition::OrbSlam(orb) = &mut config.pipeline;
-        orb.keyframes.min_parallax_px = min_parallax_px;
+        orb.keyframes.insertion = min_parallax_px
+            .map(
+                |min_parallax_px| crate::mapping::KeyframeInsertionStrategy::Parallax {
+                    min_parallax_px,
+                },
+            )
+            .unwrap_or(crate::mapping::KeyframeInsertionStrategy::FrameBased);
         let mut system = SlamSystem::build(config, SensorRig::new(camera())).unwrap();
         let mut map = map_with_keyframe_at(Pose3d::IDENTITY);
         let ref_pose = Pose3d::new(Mat3F64::IDENTITY, Vec3F64::new(0.5, 0.0, 0.0));
@@ -362,7 +368,9 @@ mod keyframe_evidence {
         let mut config = mono();
         let PipelineDefinition::OrbSlam(orb) = &mut config.pipeline;
         orb.keyframes.max_frames_between = usize::MAX;
-        orb.keyframes.min_parallax_px = Some(10.0);
+        orb.keyframes.insertion = crate::mapping::KeyframeInsertionStrategy::Parallax {
+            min_parallax_px: 10.0,
+        };
         orb.keyframes.max_interval_sec = Some(0.5);
         let mut system = SlamSystem::build(config, SensorRig::new(camera())).unwrap();
         system.state.last_keyframe_idx = Some(100);
