@@ -538,6 +538,14 @@ mod ron_files {
             ),
         ];
         for (insertion, culling, parallax, redundancy) in cases {
+            let expected_culling = if redundancy {
+                KeyframeCullingStrategy::Redundancy(KeyframeCullingConfig {
+                    min_keyframes: 2,
+                    ..KeyframeCullingConfig::default()
+                })
+            } else {
+                KeyframeCullingStrategy::Disabled
+            };
             let config = parse(&format!(
                 "(version: 1, pipeline: OrbSlam((keyframes: (insertion: {insertion}), mapping: (keyframe_culling: {culling}))))"
             ))
@@ -553,11 +561,8 @@ mod ron_files {
                 "{insertion}"
             );
             assert_eq!(
-                matches!(
-                    orb(&config).mapping.keyframe_culling,
-                    crate::mapping::KeyframeCullingStrategy::Redundancy(_)
-                ),
-                redundancy,
+                orb(&config).mapping.keyframe_culling,
+                expected_culling,
                 "{culling}"
             );
             let reloaded = parse(&ron(&config)).unwrap();
@@ -572,13 +577,18 @@ mod ron_files {
                 "round trip {insertion}"
             );
             assert_eq!(
-                matches!(
-                    orb(&reloaded).mapping.keyframe_culling,
-                    crate::mapping::KeyframeCullingStrategy::Redundancy(_)
-                ),
-                redundancy,
+                orb(&reloaded).mapping.keyframe_culling,
+                expected_culling,
                 "round trip {culling}"
             );
+            if redundancy {
+                let KeyframeCullingStrategy::Redundancy(config) =
+                    orb(&reloaded).mapping.keyframe_culling
+                else {
+                    unreachable!("{culling} must deserialize as Redundancy");
+                };
+                assert_eq!(config.min_keyframes, 2, "round trip {culling}");
+            }
         }
     }
 

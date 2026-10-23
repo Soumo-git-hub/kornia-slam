@@ -12,7 +12,6 @@ use std::collections::HashMap;
 
 // Landmark culling is implemented in `mapping::culling`.
 
-// Redundant-keyframe test fixtures live beside the policy tests.
 #[cfg(test)]
 #[path = "culling_tests.rs"]
 pub(crate) mod keyframe_tests;
